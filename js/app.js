@@ -8,6 +8,21 @@ let state = {
 
 let cloudCache = []; // dernière liste de configs publiées récupérées (cloud ou local selon dispo)
 
+// Vérifie que l'utilisateur est connecté avec Google ; sinon propose la connexion et bloque l'action
+function requireLogin(message) {
+  if (!Cloud.enabled) return true; // mode local (Firebase non configuré) : pas de restriction
+  if (Cloud.isLoggedIn()) return true;
+
+  const wantsLogin = confirm((message || "Connecte-toi avec Google pour continuer.") + "\n\nSe connecter maintenant ?");
+  if (wantsLogin) {
+    Cloud.signInWithGoogle().catch(err => {
+      console.error(err);
+      alert("Connexion impossible : " + err.message);
+    });
+  }
+  return false;
+}
+
 // Récupère les configs publiées : depuis Firebase si configuré, sinon depuis LocalStorage
 async function fetchPublishedConfigs() {
   if (Cloud.enabled) {
@@ -25,6 +40,10 @@ async function fetchPublishedConfigs() {
 // ---------- NAVIGATION ----------
 
 function navigate(pageId) {
+  if (pageId === "creation" && !requireLogin("Connecte-toi avec Google pour créer une configuration.")) {
+    return;
+  }
+
   document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
   document.querySelectorAll(".nav-btn").forEach(b => b.classList.remove("active"));
 
@@ -105,6 +124,8 @@ function attachCardEvents() {
 }
 
 function startChallenge(challengeId) {
+  if (!requireLogin("Connecte-toi avec Google pour relever un défi.")) return;
+
   const challenge = CHALLENGES.find(c => c.id === challengeId);
   state.activeChallenge = challenge;
   state.currentConfig = newEmptyConfig();
@@ -198,6 +219,8 @@ function removeComponent(id) {
 }
 
 document.getElementById("add-component").addEventListener("click", () => {
+  if (!requireLogin("Connecte-toi avec Google pour ajouter des composants.")) return;
+
   state.currentConfig.components.push({
     id: Storage.uid(),
     type: "CPU",
@@ -257,6 +280,8 @@ function syncBuilderToState() {
 }
 
 document.getElementById("save-config").addEventListener("click", () => {
+  if (!requireLogin("Connecte-toi avec Google pour sauvegarder ta configuration.")) return;
+
   if (!state.currentConfig) state.currentConfig = newEmptyConfig();
   syncBuilderToState();
 
@@ -282,6 +307,8 @@ document.getElementById("save-config").addEventListener("click", () => {
 });
 
 document.getElementById("publish-config").addEventListener("click", async () => {
+  if (!requireLogin("Connecte-toi avec Google pour publier ta configuration.")) return;
+
   if (!state.currentConfig) state.currentConfig = newEmptyConfig();
   syncBuilderToState();
 
@@ -396,6 +423,8 @@ function getAverageRating(config) {
 }
 
 async function toggleLike(configId) {
+  if (!requireLogin("Connecte-toi avec Google pour liker une configuration.")) return;
+
   if (Cloud.enabled) {
     try {
       await Cloud.toggleLike(configId);
@@ -459,14 +488,15 @@ async function openConfigModal(configId) {
   let config = cloudCache.find(c => c.id === configId);
   if (!config) return;
 
-  config.views = (config.views || 0) + 1;
-  if (Cloud.enabled) {
-    Cloud.incrementViews(configId).catch(err => console.error(err));
-  } else {
+  if (Cloud.enabled && Cloud.isLoggedIn()) {
+    const wasNew = await Cloud.incrementViews(configId).catch(err => { console.error(err); return false; });
+    if (wasNew) config.views = (config.views || 0) + 1;
+  } else if (!Cloud.enabled) {
     const configs = Storage.getConfigs();
     const localConfig = configs.find(c => c.id === configId);
     if (localConfig) {
-      localConfig.views = config.views;
+      localConfig.views = (localConfig.views || 0) + 1;
+      config.views = localConfig.views;
       Storage.saveConfigs(configs);
     }
   }
@@ -511,6 +541,8 @@ async function openConfigModal(configId) {
 }
 
 async function rateConfig(configId, value) {
+  if (!requireLogin("Connecte-toi avec Google pour noter une configuration.")) return;
+
   if (Cloud.enabled) {
     try {
       await Cloud.rate(configId, value);

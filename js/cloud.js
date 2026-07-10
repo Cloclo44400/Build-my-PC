@@ -142,8 +142,23 @@ const Cloud = {
   },
 
   async incrementViews(cloudId) {
-    if (!this.enabled) return;
+    if (!this.enabled) return false;
+    if (!this.isLoggedIn()) return false;
     const ref = this.configsCollection().doc(cloudId);
-    await ref.update({ views: firebase.firestore.FieldValue.increment(1) });
+    let counted = false;
+    await this.db.runTransaction(async (t) => {
+      const doc = await t.get(ref);
+      if (!doc.exists) return;
+      const data = doc.data();
+      const viewedBy = data.viewedBy || [];
+      if (viewedBy.includes(this.uid)) return; // déjà comptabilisé pour cet utilisateur
+      viewedBy.push(this.uid);
+      t.update(ref, {
+        viewedBy,
+        views: firebase.firestore.FieldValue.increment(1)
+      });
+      counted = true;
+    });
+    return counted;
   }
 };
