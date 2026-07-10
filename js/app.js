@@ -6,6 +6,22 @@ let state = {
   activeChallenge: null,    // défi en cours (ou null en création libre)
 };
 
+let cloudCache = []; // dernière liste de configs publiées récupérées (cloud ou local selon dispo)
+
+// Récupère les configs publiées : depuis Firebase si configuré, sinon depuis LocalStorage
+async function fetchPublishedConfigs() {
+  if (Cloud.enabled) {
+    try {
+      cloudCache = await Cloud.getPublished();
+      return cloudCache;
+    } catch (err) {
+      console.error("Erreur Firebase, repli sur le mode local :", err);
+    }
+  }
+  cloudCache = Storage.getConfigs().filter(c => c.published);
+  return cloudCache;
+}
+
 // ---------- NAVIGATION ----------
 
 function navigate(pageId) {
@@ -29,11 +45,10 @@ document.querySelectorAll("[data-nav]").forEach(el => {
 
 // ---------- ACCUEIL ----------
 
-function renderHome() {
-  const configs = Storage.getConfigs()
-    .filter(c => c.published)
-    .sort((a, b) => b.date - a.date)
-    .slice(0, 3);
+async function renderHome() {
+  document.getElementById("home-latest").innerHTML = `<p class="muted">Chargement...</p>`;
+  const all = await fetchPublishedConfigs();
+  const configs = [...all].sort((a, b) => b.date - a.date).slice(0, 3);
 
   document.getElementById("home-latest").innerHTML = configs.length
     ? configs.map(renderConfigCard).join("")
@@ -122,6 +137,7 @@ function newEmptyConfig() {
     author: getProfile().pseudo,
     date: Date.now(),
     published: false,
+    cloudId: null,
     likes: [],
     views: 0,
     ratings: [],
@@ -265,7 +281,7 @@ document.getElementById("save-config").addEventListener("click", () => {
   alert("Configuration sauvegardée ✅");
 });
 
-document.getElementById("publish-config").addEventListener("click", () => {
+document.getElementById("publish-config").addEventListener("click", async () => {
   if (!state.currentConfig) state.currentConfig = newEmptyConfig();
   syncBuilderToState();
 
@@ -280,9 +296,28 @@ document.getElementById("publish-config").addEventListener("click", () => {
 
   state.currentConfig.published = true;
   state.currentConfig.date = Date.now();
-  Storage.addOrUpdateConfig(state.currentConfig);
-  alert("Configuration publiée dans la Communauté 🎉");
-  navigate("communaute");
+  state.currentConfig.author = getProfile().pseudo;
+
+  const btn = document.getElementById("publish-config");
+  btn.disabled = true;
+  btn.textContent = "Publication...";
+
+  try {
+    if (Cloud.enabled) {
+      await Cloud.ready;
+      const cloudId = await Cloud.publish(state.currentConfig);
+      state.currentConfig.cloudId = cloudId;
+    }
+    Storage.addOrUpdateConfig(state.currentConfig); // toujours gardé en local aussi (brouillon / repli offline)
+    alert("Configuration publiée dans la Communauté 🎉");
+    navigate("communaute");
+  } catch (err) {
+    console.error(err);
+    alert(err.message || "Erreur lors de la publication.");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "📤 Publier dans la Communauté";
+  }
 });
 
 document.getElementById("export-config").addEventListener("click", () => {
@@ -332,7 +367,8 @@ document.querySelectorAll('.nav-btn[data-nav="creation"], .btn[data-nav="creatio
 
 function renderConfigCard(config) {
   const avgRating = getAverageRating(config);
-  const isLiked = config.likes.includes(getProfile().pseudo);
+  const myIdentity = Cloud.enabled ? Cloud.uid : getProfile().pseudo;
+  const isLiked = (config.likes || []).includes(myIdentity);
   return `
     <div class="card" data-config="${config.id}">
       <span class="badge">${config.name ? "" : ""}</span>
@@ -359,21 +395,31 @@ function getAverageRating(config) {
   return sum / config.ratings.length;
 }
 
-function toggleLike(configId) {
-  const configs = Storage.getConfigs();
-  const config = configs.find(c => c.id === configId);
-  if (!config) return;
-  const pseudo = getProfile().pseudo;
-  const idx = config.likes.indexOf(pseudo);
-  if (idx >= 0) config.likes.splice(idx, 1);
-  else config.likes.push(pseudo);
-  Storage.saveConfigs(configs);
-  renderCommunity();
-  renderHome();
+async function toggleLike(configId) {
+  if (Cloud.enabled) {
+    try {
+      await Cloud.toggleLike(configId);
+    } catch (err) {
+      alert(err.message);
+      return;
+    }
+  } else {
+    const configs = Storage.getConfigs();
+    const config = configs.find(c => c.id === configId);
+    if (!config) return;
+    const pseudo = getProfile().pseudo;
+    const idx = config.likes.indexOf(pseudo);
+    if (idx >= 0) config.likes.splice(idx, 1);
+    else config.likes.push(pseudo);
+    Storage.saveConfigs(configs);
+  }
+  if (state.currentPage === "communaute") renderCommunity();
+  if (state.currentPage === "accueil") renderHome();
 }
 
-function renderCommunity() {
-  let configs = Storage.getConfigs().filter(c => c.published);
+async function renderCommunity() {
+  document.getElementById("community-list").innerHTML = `<p class="muted">Chargement...</p>`;
+  let configs = await fetchPublishedConfigs();
 
   const searchTerm = (document.getElementById("search-input").value || "").toLowerCase();
   if (searchTerm) {
@@ -409,13 +455,21 @@ document.getElementById("sort-select").addEventListener("change", renderCommunit
 
 // ---------- MODALE FICHE CONFIG ----------
 
-function openConfigModal(configId) {
-  const configs = Storage.getConfigs();
-  const config = configs.find(c => c.id === configId);
+async function openConfigModal(configId) {
+  let config = cloudCache.find(c => c.id === configId);
   if (!config) return;
 
   config.views = (config.views || 0) + 1;
-  Storage.saveConfigs(configs);
+  if (Cloud.enabled) {
+    Cloud.incrementViews(configId).catch(err => console.error(err));
+  } else {
+    const configs = Storage.getConfigs();
+    const localConfig = configs.find(c => c.id === configId);
+    if (localConfig) {
+      localConfig.views = config.views;
+      Storage.saveConfigs(configs);
+    }
+  }
 
   const avg = getAverageRating(config);
   const total = configTotal(config);
@@ -454,23 +508,28 @@ function openConfigModal(configId) {
   });
 
   document.getElementById("modal-overlay").classList.add("active");
-
-  // refresh listings behind modal
-  if (state.currentPage === "communaute") renderCommunity();
-  if (state.currentPage === "accueil") renderHome();
 }
 
-function rateConfig(configId, value) {
-  const configs = Storage.getConfigs();
-  const config = configs.find(c => c.id === configId);
-  if (!config) return;
-  const pseudo = getProfile().pseudo;
-  config.ratings = config.ratings || [];
-  const existing = config.ratings.find(r => r.user === pseudo);
-  if (existing) existing.value = value;
-  else config.ratings.push({ user: pseudo, value });
-  Storage.saveConfigs(configs);
-  renderCommunity();
+async function rateConfig(configId, value) {
+  if (Cloud.enabled) {
+    try {
+      await Cloud.rate(configId, value);
+    } catch (err) {
+      alert(err.message);
+      return;
+    }
+  } else {
+    const configs = Storage.getConfigs();
+    const config = configs.find(c => c.id === configId);
+    if (!config) return;
+    const pseudo = getProfile().pseudo;
+    config.ratings = config.ratings || [];
+    const existing = config.ratings.find(r => r.user === pseudo);
+    if (existing) existing.value = value;
+    else config.ratings.push({ user: pseudo, value });
+    Storage.saveConfigs(configs);
+  }
+  if (state.currentPage === "communaute") renderCommunity();
 }
 
 document.getElementById("modal-close").addEventListener("click", () => {
@@ -486,13 +545,22 @@ function getProfile() {
   return Storage.getProfile();
 }
 
-function renderProfile() {
+async function renderProfile() {
   const profile = getProfile();
   document.getElementById("profile-pseudo").value = profile.pseudo;
   document.getElementById("profile-bio").value = profile.bio;
 
-  const myConfigs = Storage.getConfigs().filter(c => c.author === profile.pseudo);
-  const totalLikes = myConfigs.reduce((sum, c) => sum + c.likes.length, 0);
+  document.getElementById("profile-configs").innerHTML = `<p class="muted">Chargement...</p>`;
+
+  let myConfigs;
+  if (Cloud.enabled) {
+    await Cloud.ready;
+    myConfigs = await Cloud.getMine();
+    cloudCache = [...cloudCache, ...myConfigs.filter(c => !cloudCache.some(x => x.id === c.id))];
+  } else {
+    myConfigs = Storage.getConfigs().filter(c => c.author === profile.pseudo);
+  }
+  const totalLikes = myConfigs.reduce((sum, c) => sum + (c.likes ? c.likes.length : 0), 0);
 
   document.getElementById("stat-configs").textContent = myConfigs.length;
   document.getElementById("stat-challenges").textContent = profile.challengesCompleted.length;
@@ -542,4 +610,50 @@ function formatDate(timestamp) {
 
 state.currentConfig = newEmptyConfig();
 renderComponents();
-navigate("accueil");
+
+Cloud.onAuthChange = (user) => {
+  renderAuthZone(user);
+  if (["accueil", "communaute", "profil"].includes(state.currentPage)) navigate(state.currentPage);
+};
+
+function renderAuthZone(user) {
+  const zone = document.getElementById("auth-zone");
+  if (!Cloud.enabled) {
+    zone.innerHTML = "";
+    return;
+  }
+  if (user) {
+    zone.innerHTML = `
+      ${user.photoURL ? `<img src="${user.photoURL}" alt="">` : ""}
+      <span class="user-name">${escapeHtml(user.displayName || user.email || "Connecté")}</span>
+      <button class="btn small" id="logout-btn">Déconnexion</button>
+    `;
+    document.getElementById("logout-btn").addEventListener("click", () => Cloud.signOut());
+
+    // Pré-remplit le pseudo local avec le nom Google si aucun pseudo personnalisé n'a encore été choisi
+    const profile = getProfile();
+    if (!profile.googleSynced) {
+      profile.pseudo = user.displayName || profile.pseudo;
+      profile.googleSynced = true;
+      Storage.saveProfile(profile);
+    }
+  } else {
+    zone.innerHTML = `
+      <button class="google-btn" id="login-btn">
+        <svg width="16" height="16" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.9 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l6-6C34.5 5.5 29.5 3.5 24 3.5 12.7 3.5 3.5 12.7 3.5 24S12.7 44.5 24 44.5 44.5 35.3 44.5 24c0-1.2-.1-2.4-.3-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 16 19 13.5 24 13.5c3.1 0 5.8 1.1 8 3l6-6C34.5 6.5 29.5 4.5 24 4.5 15.6 4.5 8.4 9.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44.5c5.3 0 10.1-1.8 13.5-4.9l-6.2-5.2C29.4 36 26.9 37 24 37c-5.3 0-9.7-3.1-11.3-7.6l-6.5 5C8.4 39.6 15.6 44.5 24 44.5z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4 5.4l6.2 5.2C40.6 36 44.5 30.6 44.5 24c0-1.2-.1-2.4-.9-3.5z"/></svg>
+        Se connecter avec Google
+      </button>
+    `;
+    document.getElementById("login-btn").addEventListener("click", () => {
+      Cloud.signInWithGoogle().catch(err => {
+        console.error(err);
+        alert("Connexion impossible : " + err.message);
+      });
+    });
+  }
+}
+
+Cloud.init().finally(() => {
+  renderAuthZone(Cloud.user);
+  navigate("accueil");
+});

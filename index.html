@@ -17,6 +17,7 @@
     <button data-nav="communaute" class="nav-btn">Communauté</button>
     <button data-nav="profil" class="nav-btn">Profil</button>
   </nav>
+  <div id="auth-zone" class="auth-zone"></div>
 </header>
 
 <main id="app">
@@ -140,6 +141,13 @@
   </div>
 </div>
 
+<!-- Firebase (Firestore + Auth anonyme) : voir js/firebase-config.js pour la configuration -->
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+
+<script src="js/firebase-config.js"></script>
+<script src="js/cloud.js"></script>
 <script src="js/data.js"></script>
 <script src="js/storage.js"></script>
 <script src="js/compat.js"></script>
